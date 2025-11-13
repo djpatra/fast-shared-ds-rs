@@ -1,0 +1,15 @@
+[package]
+name = "rust-ipc-shared"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = [
+  "ipc-shared",
+  "producer",
+  "consumer",
+]
+
+[dependencies]
+memmap2 = "0.5"
+bytemuck = "1.12"
