@@ -28,18 +28,54 @@ impl<const BUFFER_SIZE: usize> ShmRegion<BUFFER_SIZE> {
         let mut path = std::env::temp_dir();
         path.push(name);
 
-        let file = OpenOptions::new()
+        // Try to create the file atomically. If it already exists, open it.
+        // When we create it, we are responsible for initializing the small
+        // index region. Avoid touching (zeroing) the whole buffer, which
+        // could fault in many pages for large buffers.
+        let (file, is_new) = match OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .open(&path)?;
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(f) => (f, true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let f = OpenOptions::new().read(true).write(true).open(&path)?;
+                (f, false)
+            }
+            Err(e) => return Err(e),
+        };
 
-        file.set_len(Self::SHM_TOTAL_SIZE as u64)?;
+        if is_new {
+            // Only set length for a freshly created file. Avoid truncating an
+            // existing file which could clobber data.
+            file.set_len(Self::SHM_TOTAL_SIZE as u64)?;
+        }
 
         let mmap = unsafe {
-            MmapOptions::new()
+            let mut mmap = MmapOptions::new()
                 .len(Self::SHM_TOTAL_SIZE)
-                .map_mut(&file)?
+                .map_mut(&file)?;
+
+            if is_new {
+                // Initialize only the indices region (small) instead of the
+                // whole buffer. Construct RingIndices in-place with zeroed
+                // atomics so other processes can observe a sane initial state.
+                let indices_ptr = mmap.as_mut_ptr() as *mut RingIndices;
+                std::ptr::write(
+                    indices_ptr,
+                    RingIndices {
+                        write_index: AtomicUsize::new(0),
+                        read_index: AtomicUsize::new(0),
+                    },
+                );
+                // Optionally flush to ensure visibility to other processes that
+                // may map the file immediately. Not strictly necessary for
+                // most IPC patterns, but can be enabled if needed:
+                // mmap.flush_async()?;
+            }
+
+            mmap
         };
 
         Ok(Self {
@@ -81,6 +117,9 @@ impl<const BUFFER_SIZE: usize> RingBuffer<BUFFER_SIZE> {
         let current_read = indices.read_index.load(Ordering::SeqCst);
 
         let used_len = std::mem::size_of::<u64>();
+
+        println!("{}  {}  {}", current_write, current_read, len);
+
         let used_size = if current_write >= current_read {
             current_write - current_read
         } else {
@@ -218,7 +257,7 @@ mod test {
 
     #[test]
     fn test_single_thread() {
-        let buffer = RingBuffer::<32>::new("temp").unwrap();
+        let buffer = RingBuffer::<32>::new("temp2").unwrap();
         for i in 0..8 {
             println!("i = {}", i);
             let _ = buffer.try_send(&(i as u64).to_le_bytes());
