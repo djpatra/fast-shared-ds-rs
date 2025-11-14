@@ -80,9 +80,13 @@ impl<const BUFFER_SIZE: usize> RingBuffer<BUFFER_SIZE> {
         let current_write = indices.write_index.load(Ordering::SeqCst);
         let current_read = indices.read_index.load(Ordering::SeqCst);
 
-        let used_size = current_write.wrapping_sub(current_read) as usize;
         let used_len = std::mem::size_of::<u64>();
-        println!("{}  {}  {}", used_size, aligned_len_u64, used_len);
+        let used_size = if current_write >= current_read {
+            current_write - current_read
+        } else {
+            BUFFER_SIZE - current_read + current_write
+        };
+        
         if used_size + aligned_len_u64 + used_len > BUFFER_SIZE {
             return Err("Buffer full");
         }
